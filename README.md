@@ -1,1 +1,1 @@
-# stat447-project
+# STAT 447C - Final Project
