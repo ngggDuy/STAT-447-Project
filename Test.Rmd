@@ -2,7 +2,9 @@
 title: "Project Test"
 author: "Duy Nguyen"
 date: "2024-03-16"
-output: html_document
+output:
+  pdf_document: default
+  html_document: default
 ---
 
 ```{r setup, include=FALSE}
@@ -13,6 +15,11 @@ knitr::opts_chunk$set(echo = TRUE)
 
 ```{r, echo=TRUE}
 hsbc_data <- read.csv("HSBC.csv")
-head(hsbc_data)
-```
+head(hsbc_data, 20)
 
+vn_data <- read.csv("VN Index Historical Data.csv")
+head(vn_data, 20)
+
+agg_data <- read.csv("Aggregate East Asia Data.csv")
+head(agg_data, 20)
+```
