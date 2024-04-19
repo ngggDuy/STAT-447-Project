@@ -1,0 +1,143 @@
+---
+title: "Project Test"
+author: "Duy Nguyen"
+date: "2024-03-16"
+output:
+  pdf_document: default
+  html_document: default
+---
+
+```{r setup, include=FALSE}
+knitr::opts_chunk$set(echo = TRUE)
+library(tseries)
+library(rstan)
+library(tidyr)
+library(dplyr)
+```
+
+## Data Pre-processing
+
+```{r, echo=TRUE}
+# Unemployment rate dataset
+unemployment.data <- read.csv("./data/unemployment.csv")
+
+unemployment <- unemployment.data %>%
+  select(TIME_PERIOD, OBS_VALUE) %>%
+  rename(UNEMPLOYMENT_RATE = OBS_VALUE)
+
+unemployment <- unemployment[1:(length(unemployment$TIME_PERIOD) - 2),]
+
+# Consumer Price Index (Inflation) dataset
+cpi.data <- read.csv("./data/inflation.csv")
+
+inflation <- cpi.data %>%
+  select(TIME_PERIOD, OBS_VALUE) %>%
+  rename(CPI = OBS_VALUE)
+
+inflation <- inflation[1:(length(inflation$TIME_PERIOD) - 1),]
+
+# Industrial Production Index dataset
+industrial.data <- read.csv("./data/industry.csv")
+
+industrial.data.cleaned <- industrial.data %>% 
+  select(TIME_PERIOD, Economic.activity, OBS_VALUE) %>%
+  rename(IPIndex = OBS_VALUE)
+
+industrial <- industrial.data.cleaned %>%
+  group_by(TIME_PERIOD, Economic.activity) %>%
+  pivot_wider(names_from = Economic.activity, values_from = IPIndex) 
+
+# Interest Rate dataset
+interest.data <- read.csv("./data/interest_rates.csv")
+
+interest.data.cleaned <- interest.data %>%
+  select(Measure, TIME_PERIOD, OBS_VALUE) %>%
+  rename(INTEREST_RATE = OBS_VALUE)
+
+interest <- interest.data.cleaned %>%
+  group_by(TIME_PERIOD, Measure) %>%
+  pivot_wider(names_from = Measure, values_from = INTEREST_RATE)
+
+interest <- interest %>%
+  select(-`Immediate interest rates, call money, interbank rate`)
+
+interest <- interest[1:(length(interest$TIME_PERIOD) - 14),]
+
+# TSX Index dataset 
+tsx_data <- read.csv("./data/TSX.csv")
+tsx_data <- tsx_data[1:(length(tsx_data$Date) - 3), ]
+
+# Combined dataframe construction
+
+# The TSX index dataset is the shortest so we base the combined dataframe's 
+# length on it
+min_rows <- min(length(unemployment$TIME_PERIOD), 
+                length(inflation$TIME_PERIOD), 
+                length(industrial$TIME_PERIOD), 
+                length(interest$TIME_PERIOD), 
+                length(tsx_data$Date))
+
+# Since constituent dataframes have varying starting and end dates,
+# we have to trim the data (some done above)
+
+# Calculate the starting row index for each dataframe
+start_index_unemployment <- length(unemployment$TIME_PERIOD) - min_rows + 1
+start_index_inflation <- length(inflation$TIME_PERIOD) - min_rows + 1
+start_index_industrial <- length(industrial$TIME_PERIOD) - min_rows + 1
+start_index_interest <- length(interest$TIME_PERIOD) - min_rows + 1
+
+# Select rows from the calculated starting index to the end
+unemployment <- unemployment[start_index_unemployment:length(unemployment$TIME_PERIOD), ]
+inflation    <- inflation[start_index_inflation:length(inflation$TIME_PERIOD), ]
+industrial   <- industrial[start_index_industrial:length(industrial$TIME_PERIOD), ]
+interest     <- interest[start_index_interest:length(interest$TIME_PERIOD), ]
+
+data.combined <- bind_cols(unemployment, inflation, industrial, interest, tsx_data)
+
+# Final cleanup
+data <- data.combined %>% 
+  select(Date, UNEMPLOYMENT_RATE, CPI, 
+         Construction, `Industry (except construction)`, Manufacturing, 
+         `Short-term interest rates`, `Long-term interest rates`,
+         Open, High, Low, Close, Adj.Close, Volume)
+
+```
+
+```{r, echo=TRUE}
+tsx.ts <- ts(tsx_data$Close, start=c(1985, 1), end=c(2024,4), frequency=12)
+plot(tsx.ts, main="Time Series for Monthly TSX Index Closes", ylab="Index Value")
+
+length(tsx.ts)
+
+```
+
+```{stan output.var = "rocket"}
+data {
+  int<lower=0> N;             // Number of data points
+  int<lower=0> K;             // Number of predictors
+  matrix[N, K] X;             // Predictor matrix
+  vector[N] y;                // Response variable (TSX index)
+}
+
+parameters {
+  vector[K] beta;             // Coefficients for predictors
+  real<lower=0> sigma;        // Standard deviation of the residuals
+}
+
+model {
+  // Priors
+  beta ~ normal(0, 10);       // Weakly informative priors for beta coefficients
+  sigma ~ cauchy(0, 2.5);     // Weakly informative prior for sigma
+  
+  // Likelihood
+  y ~ normal(X * beta, sigma);
+}
+```
+
+```{r, echo=TRUE}
+stan_data <- list(N = nrow(data),
+                  K = ncol(data), 
+                  X = data,
+                  y = data$Close)
+fit <- vb(rocket, data=stan_data)
+```
