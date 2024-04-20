@@ -15,9 +15,10 @@ library(tidyr)
 library(dplyr)
 ```
 
-## Data Pre-processing
+## Data Preparation
 
-```{r, echo=TRUE}
+```{r data-prep, echo=FALSE}
+#####===== Data Pre-processing =====#####
 # Unemployment rate dataset
 unemployment.data <- read.csv("./data/unemployment.csv")
 
@@ -92,29 +93,91 @@ inflation    <- inflation[start_index_inflation:length(inflation$TIME_PERIOD), ]
 industrial   <- industrial[start_index_industrial:length(industrial$TIME_PERIOD), ]
 interest     <- interest[start_index_interest:length(interest$TIME_PERIOD), ]
 
+#####===== Data Transformations & Final Cleaning =====#####
+# De-trending by fitting simple linear models to predictors and response 
+# for better model interpretability
+unemployment$TIME_INDEX <-  as.numeric(as.factor(unemployment$TIME_PERIOD))
+fit_unemployment <- lm(unemployment$UNEMPLOYMENT_RATE ~ unemployment$TIME_INDEX, data=unemployment)
+
+inflation$TIME_INDEX <-  as.numeric(as.factor(inflation$TIME_PERIOD))
+fit_inflation <- lm(inflation$CPI ~ inflation$TIME_INDEX, data=inflation)
+
+industrial$TIME_INDEX <-  as.numeric(as.factor(industrial$TIME_PERIOD))
+fit_industry <- lm(industrial$`Industry (except construction)` ~ industrial$TIME_INDEX, data=industrial)
+fit_construction <- lm(industrial$Construction ~ industrial$TIME_INDEX, data=industrial)
+fit_manufacturing <- lm(industrial$Manufacturing ~ industrial$TIME_INDEX, data=industrial)
+
+interest$TIME_INDEX <-  as.numeric(as.factor(interest$TIME_PERIOD))
+fit_long_rates <- lm(interest$`Long-term interest rates` ~ interest$TIME_INDEX, data=interest)
+fit_short_rates <- lm(interest$`Short-term interest rates` ~ interest$TIME_INDEX, data=interest)
+
+# Standardize predictor variables 
+standardized_unemployment_residuals <- scale(fit_unemployment$residuals)
+unemployment$UNEMPLOYMENT_RATE <- standardized_unemployment_residuals
+
+standardized_inflation_residuals <- scale(fit_inflation$residuals)
+inflation$CPI <- standardized_inflation_residuals
+
+standardized_industry_residuals <- scale(fit_industry$residuals)
+industrial$`Industry (except construction)` <- standardized_industry_residuals 
+standardized_construction_residuals <- scale(fit_construction$residuals)
+industrial$Construction <-standardized_construction_residuals
+standardized_manufacturing_residuals <- scale(fit_manufacturing$residuals)
+industrial$Manufacturing <-standardized_manufacturing_residuals
+
+standardized_short_rates_residuals <- scale(fit_long_rates$residuals)
+interest$`Short-term interest rates` <- standardized_short_rates_residuals
+standardized_long_rates_residuals <- scale(fit_short_rates$residuals)
+interest$`Long-term interest rates` <- standardized_long_rates_residuals
+
 data.combined <- bind_cols(unemployment, inflation, industrial, interest, tsx_data)
 
+# Open, High, Low, Close, Adj.Close, Volume
 # Final cleanup
-data <- data.combined %>% 
-  select(Date, UNEMPLOYMENT_RATE, CPI, 
+
+# Predictors
+predictors <- data.combined %>% 
+  select(UNEMPLOYMENT_RATE, CPI, 
          Construction, `Industry (except construction)`, Manufacturing, 
-         `Short-term interest rates`, `Long-term interest rates`,
-         Open, High, Low, Close, Adj.Close, Volume)
+         `Short-term interest rates`, `Long-term interest rates`)
+
+# Response
+response <- data.combined %>% 
+  select(Date, Close)
+
+# Log-transform the TSX index
+response$Close_log <- log(response$Close)
+response$Date <-  as.numeric(as.factor(response$Date))
+fit_response <- lm(response$Close_log ~ response$Date, data=response)
+response$Close_log_residuals <- fit_response$residuals
 
 ```
 
-```{r, echo=TRUE}
-tsx.ts <- ts(tsx_data$Close, start=c(1985, 1), end=c(2024,4), frequency=12)
+## Exploratory Data Analysis
+
+```{r data-explore, echo=TRUE}
+plot(inflation$CPI)
+plot(unemployment$UNEMPLOYMENT_RATE)
+plot(industrial$Construction)
+plot(industrial$`Industry (except construction)`)
+plot(industrial$Manufacturing)
+
+plot(interest$`Short-term interest rates`)
+plot(interest$`Long-term interest rates`)
+```
+
+```{r time-series, echo=TRUE}
+tsx.ts <- ts(tsx_data$Close, start=c(1985, 1), end=c(2024,1), frequency=12)
 plot(tsx.ts, main="Time Series for Monthly TSX Index Closes", ylab="Index Value")
 
 length(tsx.ts)
 
 ```
 
-```{stan output.var = "rocket"}
+```{stan output.var = "stock"}
 data {
-  int<lower=0> N;             // Number of data points
-  int<lower=0> K;             // Number of predictors
+  int<lower=1> N;             // Number of data points
+  int<lower=1> K;             // Number of predictors
   matrix[N, K] X;             // Predictor matrix
   vector[N] y;                // Response variable (TSX index)
 }
@@ -126,7 +189,7 @@ parameters {
 
 model {
   // Priors
-  beta ~ normal(0, 10);       // Weakly informative priors for beta coefficients
+  beta ~ normal(0, 1);        // Standard normal prior for beta coefficients
   sigma ~ cauchy(0, 2.5);     // Weakly informative prior for sigma
   
   // Likelihood
@@ -134,10 +197,78 @@ model {
 }
 ```
 
-```{r, echo=TRUE}
-stan_data <- list(N = nrow(data),
-                  K = ncol(data), 
-                  X = data,
-                  y = data$Close)
-fit <- vb(rocket, data=stan_data)
+```{stan output.var = "stockmixture"}
+data {
+  int<lower=1> N;             // Number of data points
+  int<lower=1> K;             // Number of predictors
+  matrix[N, K] X;             // Predictor matrix
+  vector[N] y;                // Response variable (TSX index)
+  int<lower=1> num_components; // Number of components in the mixture
+}
+
+parameters {
+  vector[K] beta[num_components];   // Coefficients for each component
+  real<lower=0> sigma[num_components]; // Standard deviation for each component
+  simplex[num_components] mixing_proportions; // Mixing proportions for each component
+}
+
+model {
+  // Priors
+  for (n in 1:num_components) {
+    beta[n] ~ normal(0, 1);
+    sigma[n] ~ cauchy(0, 2.5);
+  }
+  
+  // Mixture likelihood
+  for (i in 1:N) {
+    vector[num_components] component_likelihoods;
+    for (n in 1:num_components) {
+      component_likelihoods[n] = log(mixing_proportions[n]) + normal_lpdf(y[i] | X[i] * beta[n], sigma[n]);
+    }
+    target += log_sum_exp(component_likelihoods);
+  }
+}
+```
+
+```{r model-fitting,echo=TRUE}
+# Prepare data list for stan
+stan_data <- list(N = nrow(predictors),
+                  K = ncol(predictors),  
+                  X = predictors,
+                  y = response$Close_log_residuals,
+                  num_components = 2)
+
+# Fit stan model with variational baye's using ADVI
+fit <- vb(stockmixture, data = stan_data,
+          iter = 10000,  # Increase if needed to achieve better convergence
+          tol_rel_obj = 0.0002,  # Adjusted tolerance for stopping criterion
+          output_samples = 1000,  # Number of posterior samples to draw
+          importance_resampling = TRUE,
+          pars=c("beta", "sigma"),
+          include=TRUE,
+          elbo_samples = 250,
+          init=0,
+          algorithm="meanfield")  # Enable importance resampling
+
+
+fit <- sampling(stockmixture, data = stan_data,
+          iter = 10000)  
+
+
+# Assuming 'fit' is the output from your vb() function call
+# Extracting the posterior samples
+posterior_samples <- extract(fit)
+
+# Using base R or ggplot2 to plot the distributions
+# Plotting using base R
+hist(posterior_samples$beta[,1], main = "Distribution of Beta 1", xlab = "Beta 1")
+
+# If you prefer ggplot2 for a more advanced graphical approach
+library(ggplot2)
+df <- data.frame(Beta1 = posterior_samples$beta[,1])
+ggplot(df, aes(x = Beta1)) +
+  geom_histogram(bins = 30, fill = "blue", alpha = 0.7) +
+  labs(title = "Distribution of Beta 1", x = "Beta 1", y = "Frequency")
+
+
 ```
