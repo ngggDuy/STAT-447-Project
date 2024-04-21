@@ -1,6 +1,6 @@
 ---
-title: "Project Test"
-author: "Duy Nguyen"
+title: "Variational Bayesian Inference Methods in the Prediction of Share Closing Prices"
+author: "Duy Nguyen & Edward Bai"
 date: "2024-03-16"
 output:
   pdf_document: default
@@ -14,8 +14,6 @@ library(rstan)
 library(tidyr)
 library(dplyr)
 ```
-
-## Data Preparation
 
 ```{r data-prep, echo=FALSE}
 #####===== Data Pre-processing =====#####
@@ -151,11 +149,17 @@ response$Date <-  as.numeric(as.factor(response$Date))
 fit_response <- lm(response$Close_log ~ response$Date, data=response)
 response$Close_log_residuals <- fit_response$residuals
 
+URate_and_IRate_predictors <- predictors %>%
+  select(UNEMPLOYMENT_RATE, `Long-term interest rates`)
+
+construction_predictors <- predictors %>% 
+  select(Construction, `Industry (except construction)`, Manufacturing)
+
 ```
 
 ## Exploratory Data Analysis
 
-```{r data-explore, echo=TRUE}
+```{r data-explore, echo=FALSE, include=FALSE}
 plot(inflation$CPI)
 plot(unemployment$UNEMPLOYMENT_RATE)
 plot(industrial$Construction)
@@ -166,13 +170,7 @@ plot(interest$`Short-term interest rates`)
 plot(interest$`Long-term interest rates`)
 ```
 
-```{r time-series, echo=TRUE}
-tsx.ts <- ts(tsx_data$Close, start=c(1985, 1), end=c(2024,1), frequency=12)
-plot(tsx.ts, main="Time Series for Monthly TSX Index Closes", ylab="Index Value")
-
-length(tsx.ts)
-
-```
+## Model Description
 
 ```{stan output.var = "stock"}
 data {
@@ -223,14 +221,26 @@ model {
   for (i in 1:N) {
     vector[num_components] component_likelihoods;
     for (n in 1:num_components) {
-      component_likelihoods[n] = log(mixing_proportions[n]) + normal_lpdf(y[i] | X[i] * beta[n], sigma[n]);
+      component_likelihoods[n] = log(mixing_proportions[n]) + 
+      normal_lpdf(y[i] | X[i] * beta[n], sigma[n]);
     }
     target += log_sum_exp(component_likelihoods);
   }
 }
 ```
 
-```{r model-fitting,echo=TRUE}
+```{r model-fitting, echo=TRUE}
+stan_data <- list(N = nrow(predictors),
+                  K = ncol(predictors),  
+                  X = predictors,
+                  y = response$Close_log_residuals)
+
+# Fit stan model with variational baye's using ADVI
+fit_sampling <- sampling(stock, data = stan_data,
+          iter = 1000)
+
+plot(stan_trace(fit_sampling))
+
 # Prepare data list for stan
 stan_data <- list(N = nrow(predictors),
                   K = ncol(predictors),  
@@ -250,25 +260,49 @@ fit <- vb(stockmixture, data = stan_data,
           init=0,
           algorithm="meanfield")  # Enable importance resampling
 
-
-fit <- sampling(stockmixture, data = stan_data,
-          iter = 10000)  
-
-
-# Assuming 'fit' is the output from your vb() function call
-# Extracting the posterior samples
-posterior_samples <- extract(fit)
-
-# Using base R or ggplot2 to plot the distributions
-# Plotting using base R
-hist(posterior_samples$beta[,1], main = "Distribution of Beta 1", xlab = "Beta 1")
-
-# If you prefer ggplot2 for a more advanced graphical approach
-library(ggplot2)
-df <- data.frame(Beta1 = posterior_samples$beta[,1])
-ggplot(df, aes(x = Beta1)) +
-  geom_histogram(bins = 30, fill = "blue", alpha = 0.7) +
-  labs(title = "Distribution of Beta 1", x = "Beta 1", y = "Frequency")
+plot(stan_trace(fit))
 
 
 ```
+
+## Introduction
+
+The ability to forecast accurately whilst taking into account known information is important across all fields and industries. In economics, especially when money-making is concerned, the stakes become even higher thereby demanding a certain degree of accuracy with these predictions. Thus, statisticians and data scientists have come up with many ways to formulate prediction models, to help inform business or investment decisions, that are becoming increasingly accurate as contemporary research bolsters existing methods.
+
+Many of these methods consist of models that involve complex relationships between numerous variables, some of which are latent or unobserved meaning that some models will fare better than others. This study seeks to evaluate a number of these models against one another in the context of forecasting stock price movements to ascertain their respective performances. Specifically, we will be attempting to identify whether key macroeconomic indicators can be used to inform, and therefore improve forecasting techniques. With this in mind, we will inherently be working with large datasets, requiring the use of methods appropriate for large datasets, namely Variational Bayesian Inference models.
+
+Why do we want to use Variational Bayes (VB) for this scenario? This is because VB is often more scalable to large datasets compared to sampling-based methods like Markov Chain Monte Carlo (MCMC). For models where the resulting posterior distributions are likely to be complex and intractable due to involving high-dimensional spaces (or non-conjugate priors), VB methods provide a way to approximate these distributions. Lastly, VB’s output provides a measure that enables the comparison and selection of different potential models. (Chérief-Abdellatif & Alquier, 2018) The rest of the paper will detail the dataset under study as well as the employed methodologies and their evaluations.
+
+## Data Preparation & Analysis
+
+Acknowledging the glaring differences between economically developed and currently developing economies, we initially sought data from two different regions to make for a better comparison. However, with this difference also comes the difficulty of data collection and subsequently determining its authenticity. Several nations do not have the agency or capability to reliably report data for various reasons. From this, we narrowed our search to regions that have renowned agencies with established systems of collecting and reporting data. In addition to this, we wanted our model to be based on a globally connected economy that is likely to have significant economic reactions to international factors such as war or recessions. The Organisation for Economic Co-operation and Development (OECD) is a forum consisting of 37 democracies with market-based economies with the purpose of joint development of policy standards to encourage sustainable economic growth. The OECD has an abundant collection of data on various economic indicators that we could use and so we settled on focusing on data for the Canadian economy because it best matches the aforementioned criteria.
+
+Forecasting the movement of any particular stock is rather difficult as this necessitates a model that takes into account the myriad factors that can influence changes in stock price. Attempting to build a model that encompasses all of these potential factors will ultimately not do any good as this risks upsetting the model complexity tradeoff and the model ends up being over-fit or just not meaningful. To mitigate this, we will instead forecast the closing values of the S&P/TSX Composite Index, a benchmark Canadian index representing approximately 70% of the total market capitalization on the Toronto Stock Exchange. The closing price is the 'raw' price which is just the cash value of the last transacted price before the market closes.
+
+Regarding our predictor variables, we have 4 different economic indicators for Canada, as follows.
+
+-   Unemployment rate $U_t$
+-   Consumer Price Index $\text{CPI}_t$ (in percentage per annum)
+-   Industrial Production Indices $I$
+-   $I_{S, t}$ : Total industrial production
+-   $I_{M, t}$ : Manufacturing
+-   $I_{C, t}$ : Construction
+-   Interest Rates $R$ (in percentage per annum)
+-   $R_{\text{long}, t}$ : Long term
+-   $R_{\text{short}, t}$ : Short term
+
+Briefly speaking, these variables were chosen due to the impact and shocks they tend to have on stock market conditions. For example, high unemployment rates may indicate a faltering economy, which may lower investor confidence and hurt the performance of the stock market. Excessive inflation can reduce buying power, put pressure on company profit margins, and weaken stock values. Industrial Production indices measure real output in the three listed sectors and rising values tend to signal economic growth and, in turn, stock prices.
+
+## Model Structure
+
+We will employ a Bayesian linear regression model where the response variable $\text{TSX}_t$ is regressed on the economic indicators listed above:
+
+$$\text{TSX}_{t} = \beta_0 + \beta_1U_{t} + \beta_2CPI_{t} + \beta_3I_{\text{S}, t} + \beta_4IP_{\text{M}, t} + \beta_5IP_{\text{C}, t} + \beta_6R_{\text{long}, t} + \beta_7R_{\text{short}, t} + \epsilon_t$$
+
+It will be computationally prohibitive to approximate the posterior distributions of the model parameters (i.e. Beta coefficients, sigma) given the nature of our data. The high-dimensional data space will lead to high-dimensional integration (due to the number of variables and their cross-interactions) that are not analytically tractable. Here, Variational Bayes provides a practical solution by approximating these complex posteriors with simpler distributions through a Variational Family which is a family of distributions that approximates the posteriors. We will be using the common choice of the mean-field variational family in which the joint distribution of the model parameters is approximated by a product of independent distributions for each parameter:
+
+$$q(\theta) = q(\beta_0) \times q(\beta_1) \times \cdots \times q(\beta_7) \times q(\sigma^2)$$
+
+Here, $\theta$ represents all the parameters in the model and each Beta and sigma is assumed to have its own distinct distribution q, typically chosen to be in the same family as the prior (normal and inverse-gamma).
+
+In Bayesian linear regression, using a normal prior for the regression coefficients ($\beta$) is a natural choice when the likelihood is also normal (as is the case with the residuals). This combination leads to a normal posterior, which is a conjugate prior for the normal likelihood and this will simplify computations.
