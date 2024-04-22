@@ -4,9 +4,22 @@ author: "Duy Nguyen & Edward Bai"
 date: "2024-03-16"
 output:
   pdf_document: default
-  html_document: default
+header-includes:
+  - \usepackage{hanging}
+  - \usepackage[backend=biber, style=authoryear, natbib=true]{biblatex}
+bibliography: references.bib
+link-citations: true
+nocite: '@*'
 ---
 
+```{=html}
+<style>
+#references {
+  margin-left: 1.5em;
+  text-indent: -1.5em;
+}
+</style>
+```
 ```{r setup, include=FALSE}
 knitr::opts_chunk$set(echo = TRUE)
 library(tseries)
@@ -15,7 +28,7 @@ library(tidyr)
 library(dplyr)
 ```
 
-```{r data-prep, echo=FALSE}
+```{r data-prep, echo=FALSE, include=FALSE}
 #####===== Data Pre-processing =====#####
 # Unemployment rate dataset
 unemployment.data <- read.csv("./data/unemployment.csv")
@@ -157,20 +170,214 @@ construction_predictors <- predictors %>%
 
 ```
 
-## Exploratory Data Analysis
+```{stan output.var = "stock", include=FALSE}
+data {
+  int<lower=1> N;             // Number of data points
+  int<lower=1> K;             // Number of predictors
+  matrix[N, K] X;             // Predictor matrix
+  vector[N] y;                // Response variable (TSX index)
+}
 
-```{r data-explore, echo=FALSE, include=FALSE}
-plot(inflation$CPI)
-plot(unemployment$UNEMPLOYMENT_RATE)
-plot(industrial$Construction)
-plot(industrial$`Industry (except construction)`)
-plot(industrial$Manufacturing)
+parameters {
+  vector[K] beta;             // Coefficients for predictors
+  real<lower=0> sigma;        // Standard deviation of the residuals
+}
 
-plot(interest$`Short-term interest rates`)
-plot(interest$`Long-term interest rates`)
+model {
+  // Priors
+  beta ~ normal(0, 1);        // Standard normal prior for beta coefficients
+  sigma ~ cauchy(0, 2.5);     // Weakly informative prior for sigma
+  
+  // Likelihood
+  y ~ normal(X * beta, sigma);
+}
 ```
 
-## Model Description
+```{stan output.var = "stockmixture", include=FALSE}
+data {
+  int<lower=1> N;             // Number of data points
+  int<lower=1> K;             // Number of predictors
+  matrix[N, K] X;             // Predictor matrix
+  vector[N] y;                // Response variable (TSX index)
+  int<lower=1> num_components; // Number of components in the mixture
+}
+
+parameters {
+  vector[K] beta[num_components];   // Coefficients for each component
+  real<lower=0> sigma[num_components]; // Standard deviation for each component
+  simplex[num_components] mixing_proportions; // Mixing proportions for each component
+}
+
+model {
+  // Priors
+  for (n in 1:num_components) {
+    beta[n] ~ normal(0, 1);
+    sigma[n] ~ cauchy(0, 2.5);
+  }
+  
+  // Mixture likelihood
+  for (i in 1:N) {
+    vector[num_components] component_likelihoods;
+    for (n in 1:num_components) {
+      component_likelihoods[n] = log(mixing_proportions[n]) + 
+      normal_lpdf(y[i] | X[i] * beta[n], sigma[n]);
+    }
+    target += log_sum_exp(component_likelihoods);
+  }
+}
+```
+
+```{r, echo=FALSE, include=FALSE}
+stan_data <- list(N = nrow(predictors),
+                  K = ncol(predictors),  
+                  X = predictors,
+                  y = response$Close_log_residuals)
+
+# Fit stan model with variational baye's using ADVI
+fit_sampling <- sampling(stock, data = stan_data,
+          iter = 1000)
+```
+
+```{r, echo=FALSE, include=FALSE}
+# Prepare data list for stan
+stan_data <- list(N = nrow(predictors),
+                  K = ncol(predictors),  
+                  X = predictors,
+                  y = response$Close_log_residuals,
+                  num_components = 2)
+
+# Fit stan model with variational baye's using ADVI
+fit_mixture <- vb(stockmixture, data = stan_data,
+          iter = 10000,  
+          tol_rel_obj = 0.0002,  # Adjusted tolerance for stopping criterion
+          output_samples = 1000,  
+          importance_resampling = TRUE,
+          pars=c("beta", "sigma"),
+          include=TRUE,
+          elbo_samples = 250,
+          init=0,
+          algorithm="meanfield")  # Enable importance resampling
+```
+
+```{r, include=FALSE, echo=FALSE}
+
+fit_sampling_trace <- plot(stan_trace(fit_sampling))
+
+fit_mixture_trace <- plot(stan_trace(fit_mixture))
+
+fit_mixture_posterior <- plot(stan_plot(fit_mixture))
+
+```
+
+# Introduction
+
+The ability to forecast accurately whilst taking into account known information is important across all fields and industries. In economics, especially when money-making is concerned, the stakes become even higher thereby demanding a certain degree of accuracy with these predictions. Thus, statisticians and data scientists have come up with many ways to formulate prediction models, to help inform business or investment decisions, that are becoming increasingly accurate as contemporary research bolsters existing methods.
+
+Many of these methods consist of models that involve complex relationships between numerous variables, some of which are latent or unobserved meaning that some models will fare better than others. This study seeks to evaluate a number of these models against one another in the context of forecasting stock price movements to ascertain their respective performances. Specifically, we will be attempting to identify whether key macroeconomic indicators can be used to inform, and therefore improve forecasting techniques. With this in mind, we will inherently be working with large datasets, requiring the use of methods appropriate for large datasets, namely Variational Bayesian Inference models.
+
+Why do we want to use Variational Bayes (VB) for this scenario? This is because VB is often more scalable to large datasets compared to sampling-based methods like Markov Chain Monte Carlo (MCMC). For models where the resulting posterior distributions are likely to be complex and intractable due to involving high-dimensional spaces (or non-conjugate priors), VB methods provide a way to approximate these distributions. Lastly, VB’s output provides a measure that enables the comparison and selection of different potential models [@cherief2018consistency]. The rest of the paper will detail the dataset under study as well as the employed methodologies and their evaluations.
+
+# Data Preparation & Analysis
+
+Acknowledging the glaring differences between economically developed and currently developing economies, we initially sought data from two different regions to make for a better comparison. However, with this difference also comes the difficulty of data collection and subsequently determining its authenticity. Several nations do not have the agency or capability to reliably report data for various reasons. From this, we narrowed our search to regions that have renowned agencies with established systems of collecting and reporting data. In addition to this, we wanted our model to be based on a globally connected economy that is likely to have significant economic reactions to international factors such as war or recessions. The Organisation for Economic Co-operation and Development (OECD) is a forum consisting of 37 democracies with market-based economies with the purpose of joint development of policy standards to encourage sustainable economic growth. The OECD has an abundant collection of data on various economic indicators that we could use and so we settled on focusing on data for the Canadian economy because it best matches the aforementioned criteria.
+
+Forecasting the movement of any particular stock is rather difficult as this necessitates a model that takes into account the myriad factors that can influence changes in stock price. Attempting to build a model that encompasses all of these potential factors will ultimately not do any good as this risks upsetting the model complexity tradeoff and the model ends up being over-fit or just not meaningful. To mitigate this, we will instead forecast the closing values of the S&P/TSX Composite Index, a benchmark Canadian index representing approximately 70% of the total market capitalization on the Toronto Stock Exchange. The closing price is the 'raw' price which is just the cash value of the last transacted price before the market closes.
+
+Regarding our predictor variables, we have 4 different economic indicators for Canada, as follows.
+
+-   Unemployment rate $U_t$
+-   Consumer Price Index $\text{CPI}_t$ (in percentage per annum)
+-   Industrial Production Indices $I$
+    -   $I_{S, t}$ : Total industrial production
+    -   $I_{M, t}$ : Manufacturing
+    -   $I_{C, t}$ : Construction
+-   Interest Rates $R$ (in percentage per annum)
+    -   $R_{\text{long}, t}$ : Long term
+    -   $R_{\text{short}, t}$ : Short term
+
+Briefly speaking, these variables were chosen due to the impact and shocks they tend to have on stock market conditions. For example, high unemployment rates may indicate a faltering economy, which may lower investor confidence and hurt the performance of the stock market. Excessive inflation can reduce buying power, put pressure on company profit margins, and weaken stock values. Industrial Production indices measure real output in the three listed sectors and rising values tend to signal economic growth and, in turn, stock prices.
+
+# Model Structure
+
+We will employ a Bayesian linear regression model where the response variable $\text{TSX}_t$ is regressed on the economic indicators listed above:
+
+$$\text{TSX}_{t} = \beta_0 + \beta_1U_{t} + \beta_2CPI_{t} + \beta_3I_{\text{S}, t} + \beta_4IP_{\text{M}, t} + \beta_5IP_{\text{C}, t} + \beta_6R_{\text{long}, t} + \beta_7R_{\text{short}, t} + \epsilon_t$$
+
+It will be computationally prohibitive to approximate the posterior distributions of the model parameters (i.e. Beta coefficients, sigma) given the nature of our data. The high-dimensional data space will lead to high-dimensional integration (due to the number of variables and their cross-interactions) that are not analytically tractable. Here, Variational Bayes provides a practical solution by approximating these complex posteriors with simpler distributions through a Variational Family which is a family of distributions that approximates the posteriors. We will be using the common choice of the mean-field variational family in which the joint distribution of the model parameters is approximated by a product of independent distributions for each parameter:
+
+$$q(\theta) = q(\beta_0) \times q(\beta_1) \times \cdots \times q(\beta_7) \times q(\sigma^2)$$
+
+Here, $\theta$ represents all the parameters in the model and each $\beta$ and $\sigma$ is assumed to have its own distinct distribution q, typically chosen to be in the same family as the prior (normal and cauchy distributions). This means that we will be using a normal prior for the regression coefficients ($\beta$) which is a natural choice when the likelihood is also normal (as is the case with the residuals). This combination leads to a normal posterior, which is a conjugate prior for the normal likelihood and this will simplify computations. Note that due to the nature of the data, the predictors have large differences in magnitude. In order to make predictions more interpretable, the data has been standardized and then fitted with a simple linear model. To remove any present trends from the data, their residuals are then used for training the VB model.
+
+$$\beta_i \sim N(0, 1) \text{ for } i \in [1, 7]$$
+
+For the variance parameter, we will be using the Half-cauchy prior for its robustness. It's heavy tails enable the accommodation of outliers and large variances, which is quite common from a quick inspection of the data. We could alternatively use an Inverse-Gamma distribution for the variance but this can lead to overly informative priors that affect the robustness of posterior estimates.
+
+$$\sigma \sim Cauchy(0, 2.5)$$
+
+The aim of VB is to minimize the Kullback-Leibler (KL) divergence between the variational distribution $q(\theta)$ and the true posterior $p(\theta|\text{data})$. This is done by maximizing the Evidence Lower Bound (ELBO).
+
+$$\text{ELBO} = \mathbb{E}_q[\log p(y, \theta)] - \mathbb{E}_q[\log q(\theta)]$$
+
+# Results
+
+Due to the experimental nature of the `vb()` function from the RStan library, we will also fit a simpler model using the `sampling()` function for Monte Carlo Markov Chains (MCMC) and compare their performances. The models yield the trace plots on the following pages. It is evident for the model with mixtures that the chains have poorly mixed because they appear separated and don’t fully explore the parameter space. Moreover, the ELBO values generated from fitting the model via variational bayesian inference initially increases, as we expected, but it quickly plateaus. Repeating the fitting process, we see that the Pareto K diagnostic value from VB fluctuates roughly between 0.7 and 1.5 (See Appendix). Normally, we want Pareto K's between 0.5 and 0.7 which means that this methodology needs extensive fine-tuning and re-specification. 
+
+```{r mixture_trace_chunk, fig.cap='Trace plot for variational model with mixtures', echo=FALSE}
+fit_mixture_trace
+```
+
+In contrast, the simpler model trace plots exhibits the 'fuzzy caterpillar' shape meaning that the chains for each parameter are mixing well, moving over the same space without obvious trends or repeated patterns. This indicates that the chains are converging to the target distribution. 
+
+```{r sampling_trace_chunk, fig.cap='Trace plot for simple model', echo=FALSE}
+fit_sampling_trace
+```
+
+# Criticism and Conclusion
+
+It is obvious that a lot of critique can be said about the model under study.  There are still many ways to improve the current model, such as by continuing to fine-tune the model hyper-parameters, using more samples, or employing more diagnostic methods that can give specific insight into how the model can be improved. Building a model in the intrinsically complex problem domain of economics would naturally cause the model to be complex itself, especially when mixtures are incorporated. Along with the identification problem (different parameter values may result in the same mixture distribution), this complexity makes the model rather difficult to fit and interpret. Moreover, high Pareto k diagnostic values suggest that the variational approximation may be missing important parts of the posterior distribution meaning that the model is not capturing the complexity of the data. 
+
+In addition, financial time series data can exhibit heavy tails, and a normal likelihood may not be the best prior choice. The model also does not account for potential autocorrelations within the time-series data. Ignoring these temporal dependencies, namely auto-regressive and moving average components) will absolutely lead to a mis-specified model. In this vein, it would be wise to incorporate these new time dependent variables into the current model in order to further this study. Should time permit, addressing these issues should enhance the robustness and reliability of the model estimations.
+
+\newpage
+
+# References
+
+::: {#refs}
+:::
+
+\newpage
+
+# Appendix
+
+The following are plots to show what the data under study look like.
+
+```{r data-explore, echo=TRUE}
+plot(inflation$CPI, main="Consumer Price Index, 1985-2024",
+     ylab="Index", xlab="Months since 1985")
+plot(unemployment$UNEMPLOYMENT_RATE, main="Unemployment rate, 1985-2024",
+     ylab="Rate (Percentage per annnum)", xlab="Months since 1985")
+plot(industrial$Construction, 
+     main="Industrial Production Index for Construction Sector, 1985-2024",
+     ylab="Index", xlab="Months since 1985")
+plot(industrial$`Industry (except construction)`,
+     main="Industrial Production Index for all Industry, except Construction, 1985-2024",
+     ylab="Index", xlab="Months since 1985")
+plot(industrial$Manufacturing,
+     main="Industrial Production Index for Manufacturing Sector, 1985-2024",
+     ylab="Index", xlab="Months since 1985")
+plot(interest$`Short-term interest rates`,
+     main="Short-term Interest Rates", ylab="Rate (Percentage per annnum)", 
+     xlab="Months since 1985")
+plot(interest$`Long-term interest rates`,
+     main="Short-term Interest Rates", ylab="Rate (Percentage per annnum)", 
+     xlab="Months since 1985")
+plot(response$Close_log_residuals, 
+     main="Log-transformed residuals of TSX Index Closing Values",
+     ylab="Index", xlab="Months since 1985")
+```
+
+The following Stan program is the simpler model, without mixtures, used in the analysis of the data under study.
 
 ```{stan output.var = "stock"}
 data {
@@ -194,6 +401,8 @@ model {
   y ~ normal(X * beta, sigma);
 }
 ```
+
+The following Stan program is the model that contains mixtures.
 
 ```{stan output.var = "stockmixture"}
 data {
@@ -229,7 +438,9 @@ model {
 }
 ```
 
-```{r model-fitting, echo=TRUE}
+The following code block fits the two models onto the data under study and is followed by their respective outputs which are both discussed in the study.
+
+```{r simple-model-fitting, echo=TRUE}
 stan_data <- list(N = nrow(predictors),
                   K = ncol(predictors),  
                   X = predictors,
@@ -238,9 +449,9 @@ stan_data <- list(N = nrow(predictors),
 # Fit stan model with variational baye's using ADVI
 fit_sampling <- sampling(stock, data = stan_data,
           iter = 1000)
+```
 
-plot(stan_trace(fit_sampling))
-
+```{r mixture-model-fitting, echo=TRUE}
 # Prepare data list for stan
 stan_data <- list(N = nrow(predictors),
                   K = ncol(predictors),  
@@ -249,60 +460,28 @@ stan_data <- list(N = nrow(predictors),
                   num_components = 2)
 
 # Fit stan model with variational baye's using ADVI
-fit <- vb(stockmixture, data = stan_data,
-          iter = 10000,  # Increase if needed to achieve better convergence
+fit_mixture <- vb(stockmixture, data = stan_data,
+          iter = 10000,  
           tol_rel_obj = 0.0002,  # Adjusted tolerance for stopping criterion
-          output_samples = 1000,  # Number of posterior samples to draw
+          output_samples = 1000,  
           importance_resampling = TRUE,
           pars=c("beta", "sigma"),
           include=TRUE,
           elbo_samples = 250,
           init=0,
           algorithm="meanfield")  # Enable importance resampling
-
-plot(stan_trace(fit))
-
-
 ```
 
-## Introduction
+```{r more-plots, echo=FALSE, include=FALSE}
+plot(stan_plot(fit_mixture, pars=c("beta", "sigma")), 
+     main="Posterior intervals and point estimates for Mixture model")
 
-The ability to forecast accurately whilst taking into account known information is important across all fields and industries. In economics, especially when money-making is concerned, the stakes become even higher thereby demanding a certain degree of accuracy with these predictions. Thus, statisticians and data scientists have come up with many ways to formulate prediction models, to help inform business or investment decisions, that are becoming increasingly accurate as contemporary research bolsters existing methods.
+plot(stan_plot((fit_sampling)),
+     main="Posterior intervals and point estimates for Sampling model")
 
-Many of these methods consist of models that involve complex relationships between numerous variables, some of which are latent or unobserved meaning that some models will fare better than others. This study seeks to evaluate a number of these models against one another in the context of forecasting stock price movements to ascertain their respective performances. Specifically, we will be attempting to identify whether key macroeconomic indicators can be used to inform, and therefore improve forecasting techniques. With this in mind, we will inherently be working with large datasets, requiring the use of methods appropriate for large datasets, namely Variational Bayesian Inference models.
+plot(stan_hist(fit_mixture, pars=c("beta", "sigma")), 
+     main="Posterior intervals and point estimates for Mixture model")
 
-Why do we want to use Variational Bayes (VB) for this scenario? This is because VB is often more scalable to large datasets compared to sampling-based methods like Markov Chain Monte Carlo (MCMC). For models where the resulting posterior distributions are likely to be complex and intractable due to involving high-dimensional spaces (or non-conjugate priors), VB methods provide a way to approximate these distributions. Lastly, VB’s output provides a measure that enables the comparison and selection of different potential models. (Chérief-Abdellatif & Alquier, 2018) The rest of the paper will detail the dataset under study as well as the employed methodologies and their evaluations.
-
-## Data Preparation & Analysis
-
-Acknowledging the glaring differences between economically developed and currently developing economies, we initially sought data from two different regions to make for a better comparison. However, with this difference also comes the difficulty of data collection and subsequently determining its authenticity. Several nations do not have the agency or capability to reliably report data for various reasons. From this, we narrowed our search to regions that have renowned agencies with established systems of collecting and reporting data. In addition to this, we wanted our model to be based on a globally connected economy that is likely to have significant economic reactions to international factors such as war or recessions. The Organisation for Economic Co-operation and Development (OECD) is a forum consisting of 37 democracies with market-based economies with the purpose of joint development of policy standards to encourage sustainable economic growth. The OECD has an abundant collection of data on various economic indicators that we could use and so we settled on focusing on data for the Canadian economy because it best matches the aforementioned criteria.
-
-Forecasting the movement of any particular stock is rather difficult as this necessitates a model that takes into account the myriad factors that can influence changes in stock price. Attempting to build a model that encompasses all of these potential factors will ultimately not do any good as this risks upsetting the model complexity tradeoff and the model ends up being over-fit or just not meaningful. To mitigate this, we will instead forecast the closing values of the S&P/TSX Composite Index, a benchmark Canadian index representing approximately 70% of the total market capitalization on the Toronto Stock Exchange. The closing price is the 'raw' price which is just the cash value of the last transacted price before the market closes.
-
-Regarding our predictor variables, we have 4 different economic indicators for Canada, as follows.
-
--   Unemployment rate $U_t$
--   Consumer Price Index $\text{CPI}_t$ (in percentage per annum)
--   Industrial Production Indices $I$
--   $I_{S, t}$ : Total industrial production
--   $I_{M, t}$ : Manufacturing
--   $I_{C, t}$ : Construction
--   Interest Rates $R$ (in percentage per annum)
--   $R_{\text{long}, t}$ : Long term
--   $R_{\text{short}, t}$ : Short term
-
-Briefly speaking, these variables were chosen due to the impact and shocks they tend to have on stock market conditions. For example, high unemployment rates may indicate a faltering economy, which may lower investor confidence and hurt the performance of the stock market. Excessive inflation can reduce buying power, put pressure on company profit margins, and weaken stock values. Industrial Production indices measure real output in the three listed sectors and rising values tend to signal economic growth and, in turn, stock prices.
-
-## Model Structure
-
-We will employ a Bayesian linear regression model where the response variable $\text{TSX}_t$ is regressed on the economic indicators listed above:
-
-$$\text{TSX}_{t} = \beta_0 + \beta_1U_{t} + \beta_2CPI_{t} + \beta_3I_{\text{S}, t} + \beta_4IP_{\text{M}, t} + \beta_5IP_{\text{C}, t} + \beta_6R_{\text{long}, t} + \beta_7R_{\text{short}, t} + \epsilon_t$$
-
-It will be computationally prohibitive to approximate the posterior distributions of the model parameters (i.e. Beta coefficients, sigma) given the nature of our data. The high-dimensional data space will lead to high-dimensional integration (due to the number of variables and their cross-interactions) that are not analytically tractable. Here, Variational Bayes provides a practical solution by approximating these complex posteriors with simpler distributions through a Variational Family which is a family of distributions that approximates the posteriors. We will be using the common choice of the mean-field variational family in which the joint distribution of the model parameters is approximated by a product of independent distributions for each parameter:
-
-$$q(\theta) = q(\beta_0) \times q(\beta_1) \times \cdots \times q(\beta_7) \times q(\sigma^2)$$
-
-Here, $\theta$ represents all the parameters in the model and each Beta and sigma is assumed to have its own distinct distribution q, typically chosen to be in the same family as the prior (normal and inverse-gamma).
-
-In Bayesian linear regression, using a normal prior for the regression coefficients ($\beta$) is a natural choice when the likelihood is also normal (as is the case with the residuals). This combination leads to a normal posterior, which is a conjugate prior for the normal likelihood and this will simplify computations.
+plot(stan_hist((fit_sampling)),
+     main="Posterior intervals and point estimates for Sampling model")
+```
